@@ -2,7 +2,12 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -28,10 +33,77 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-
 	fmt.Println("uploading thumbnail for video", videoID, "by user", userID)
 
-	// TODO: implement the upload here
+	const maxMemory = 10 << 20
+	err = r.ParseMultipartForm(maxMemory)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't parse form data", err)
+		return
+	}
 
-	respondWithJSON(w, http.StatusOK, struct{}{})
+	tn, header, err := r.FormFile("thumbnail")
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't parse thumbnail field", err)
+		return
+	}
+	defer tn.Close()
+
+	contentType := header.Header.Get("Content-Type")
+
+	//img, err := io.ReadAll(tn)
+	//if err != nil {
+	//	respondWithError(w, http.StatusInternalServerError, "Cannot read thumbnail", err)
+	//	return
+	//}
+
+	video, err := cfg.db.GetVideo(videoID)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "Cannot find video to attach thumbnail to", err)
+		return
+	}
+
+	if video.UserID != userID {
+		respondWithError(w, http.StatusUnauthorized, "Video does not relate to provided user", err)
+		return
+	}
+
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Cannot read content type", err)
+		return
+	}
+
+	if mediaType != "image/jpeg" || mediaType != "image/png" {
+		respondWithError(w, http.StatusBadRequest, "Wrong MIME type", err)
+		return
+	}
+
+	filename := videoID.String() + "." + strings.Split(mediaType, "/")[1]
+
+	path := filepath.Join(cfg.assetsRoot, filename)
+
+	file, err := os.Create(path)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Cannot create file", err)
+		return
+	}
+
+	_, err = io.Copy(file, tn)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Cannot write file", err)
+		return
+	}
+
+	thumbnailURL := fmt.Sprintf("http://localhost:%s/assets/%s", cfg.port, filename)
+
+	video.ThumbnailURL = &thumbnailURL
+
+	err = cfg.db.UpdateVideo(video)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Cannot update video metadata", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, video)
 }
